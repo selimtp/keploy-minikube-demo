@@ -5,6 +5,9 @@ metadata:
 spec:
   backoffLimit: 0
   template:
+    metadata:
+      labels:
+        app: keploy-recorder
     spec:
       restartPolicy: Never
       hostPID: true
@@ -14,9 +17,26 @@ spec:
           imagePullPolicy: Never
           securityContext:
             privileged: true
-          command: ["/bin/sh", "-c"]
+          command: ["/bin/bash", "-c"]
           args:
-            - exec keploy test --path /data --disableANSI --delay 5 -c "node /app/app.js"
+            - |
+              set -o pipefail
+              mountpoint -q /sys/kernel/debug || mount -t debugfs debugfs /sys/kernel/debug
+              mountpoint -q /sys/kernel/tracing || mount -t tracefs tracefs /sys/kernel/tracing
+              keploy test --path /data --disableANSI --delay 5 -c "node /app/app.js" 2>&1 | tee /tmp/keploy-test.log
+              KEPLOY_STATUS=${PIPESTATUS[0]}
+              if grep -Eq 'Total test failed:[[:space:]]*[1-9][0-9]*' /tmp/keploy-test.log; then
+                echo "Keploy reported failed tests"
+                exit 1
+              fi
+              if ! grep -Eq 'Total test failed:[[:space:]]*0' /tmp/keploy-test.log; then
+                echo "Keploy did not produce a successful test summary"
+                exit 1
+              fi
+              exit "$KEPLOY_STATUS"
+          ports:
+            - name: http
+              containerPort: 8080
           volumeMounts:
             - name: keploy-data
               mountPath: /data
@@ -24,4 +44,3 @@ spec:
         - name: keploy-data
           persistentVolumeClaim:
             claimName: keploy-data
-

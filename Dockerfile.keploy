@@ -1,12 +1,16 @@
 FROM node:20-bookworm-slim
 
+ARG KEPLOY_VERSION=v2.5.2
+
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
-    && curl -sSL https://keploy.io/install.sh -o /tmp/install-keploy.sh \
-    && bash /tmp/install-keploy.sh -noRoot -isCI \
-    && install -m 0755 /root/.keploy/bin/keploy /usr/local/bin/keploy \
-    && rm -rf /root/.keploy \
-    && rm -f /tmp/install-keploy.sh \
+    && apt-get install -y --no-install-recommends ca-certificates curl mount \
+    && curl -fsSL --retry 5 --retry-all-errors \
+        "https://github.com/keploy/keploy/releases/download/${KEPLOY_VERSION}/keploy_linux_amd64.tar.gz" \
+        -o /tmp/keploy.tar.gz \
+    && tar -xzf /tmp/keploy.tar.gz -C /tmp \
+    && install -m 0755 /tmp/keploy /usr/local/bin/keploy \
+    && keploy --version \
+    && rm -f /tmp/keploy /tmp/keploy.tar.gz \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -32,16 +32,13 @@ spec:
             privileged: true
           command: ["/bin/sh", "-c"]
           args:
-            - exec keploy record --path /data --disableANSI -c "node /app/app.js"
+            - |
+              mountpoint -q /sys/kernel/debug || mount -t debugfs debugfs /sys/kernel/debug
+              mountpoint -q /sys/kernel/tracing || mount -t tracefs tracefs /sys/kernel/tracing
+              exec keploy record --path /data --disableANSI -c "node /app/app.js"
           ports:
             - name: http
               containerPort: 8080
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: http
-            initialDelaySeconds: 3
-            periodSeconds: 2
           volumeMounts:
             - name: keploy-data
               mountPath: /data
@@ -61,4 +58,3 @@ spec:
     - name: http
       port: 8080
       targetPort: http
-

@@ -8,7 +8,7 @@ pipeline {
     parameters {
         string(
             name: 'SOURCE_DIR',
-            defaultValue: '/workspace/keploy-app',
+            defaultValue: '/workspace/keploy-minikube-demo',
             description: 'Use the mounted demo path, or . for an SCM checkout.'
         )
         string(
@@ -21,6 +21,7 @@ pipeline {
     environment {
         APP_IMAGE = "keploy-demo-notes:${BUILD_NUMBER}"
         TEST_NAMESPACE = "keploy-demo-${BUILD_NUMBER}"
+        KUBECONFIG = '/var/jenkins_home/minikube-kubeconfig'
     }
 
     stages {
@@ -29,11 +30,18 @@ pipeline {
                 dir("${params.SOURCE_DIR}") {
                     sh '''
                         set -eu
-                        test -f Dockerfile.keploy
-                        test -f k8s/record.yaml
+                        test -f Dockerfile.keploy || {
+                            echo "Missing $(pwd)/Dockerfile.keploy"
+                            ls -la
+                            exit 1
+                        }
+                        test -f k8s/record.yaml || {
+                            echo "Missing $(pwd)/k8s/record.yaml"
+                            find . -maxdepth 2 -type f -print
+                            exit 1
+                        }
                         docker version
                         kubectl version --client
-                        minikube status -p "$MINIKUBE_PROFILE"
                         kubectl --context "$MINIKUBE_PROFILE" get nodes
                     '''
                 }
@@ -45,8 +53,17 @@ pipeline {
                 dir("${params.SOURCE_DIR}") {
                     sh '''
                         set -eu
-                        docker build --pull -f Dockerfile.keploy -t "$APP_IMAGE" .
-                        minikube image load -p "$MINIKUBE_PROFILE" "$APP_IMAGE"
+                        BUILD_STATUS=1
+                        for attempt in 1 2 3; do
+                            if docker build -f Dockerfile.keploy -t "$APP_IMAGE" .; then
+                                BUILD_STATUS=0
+                                break
+                            fi
+                            echo "Docker build attempt $attempt failed; retrying in 10 seconds"
+                            sleep 10
+                        done
+                        test "$BUILD_STATUS" -eq 0
+                        docker save "$APP_IMAGE" | docker exec -i minikube docker load
                     '''
                 }
             }
@@ -60,8 +77,15 @@ pipeline {
                         kubectl --context "$MINIKUBE_PROFILE" create namespace "$TEST_NAMESPACE"
                         sed "s|__APP_IMAGE__|$APP_IMAGE|g" k8s/record.yaml \
                           | kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" apply -f -
-                        kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" \
-                          rollout status deployment/keploy-recorder --timeout=180s
+                        if ! kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" \
+                          rollout status deployment/keploy-recorder --timeout=180s; then
+                            echo "Keploy recorder did not become ready"
+                            kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" get pods,pvc -o wide || true
+                            kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" describe deployment/keploy-recorder || true
+                            kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" describe pods || true
+                            kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" logs deployment/keploy-recorder --all-containers --tail=-1 || true
+                            exit 1
+                        fi
 
                         kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" run keploy-traffic \
                           --rm -i --restart=Never \
@@ -74,7 +98,17 @@ pipeline {
                               if (!response.ok) throw new Error(`${options.method || "GET"} ${path}: ${response.status}`);
                             }
                             async function main() {
-                              await request("/health");
+                              let ready = false;
+                              for (let attempt = 0; attempt < 30; attempt += 1) {
+                                try {
+                                  await request("/health");
+                                  ready = true;
+                                  break;
+                                } catch (error) {
+                                  await new Promise((resolve) => setTimeout(resolve, 2000));
+                                }
+                              }
+                              if (!ready) throw new Error("Application did not become ready");
                               await request("/notes");
                               await request("/notes", {
                                 method: "POST",
@@ -128,7 +162,7 @@ pipeline {
         always {
             sh '''
                 kubectl --context "$MINIKUBE_PROFILE" delete namespace "$TEST_NAMESPACE" --ignore-not-found --wait=false || true
-                minikube image rm -p "$MINIKUBE_PROFILE" "$APP_IMAGE" >/dev/null 2>&1 || true
+                docker exec minikube docker image rm "$APP_IMAGE" >/dev/null 2>&1 || true
                 docker image rm "$APP_IMAGE" >/dev/null 2>&1 || true
             '''
         }
