@@ -1,0 +1,17 @@
+FROM node:20-bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && curl -sSL https://keploy.io/install.sh -o /tmp/install-keploy.sh \
+    && bash /tmp/install-keploy.sh -noRoot -isCI \
+    && install -m 0755 /root/.keploy/bin/keploy /usr/local/bin/keploy \
+    && rm -rf /root/.keploy \
+    && rm -f /tmp/install-keploy.sh \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY package.json ./
+RUN npm install --omit=dev
+COPY app.js ./
+
+EXPOSE 8080

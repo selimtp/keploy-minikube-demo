@@ -1,0 +1,136 @@
+pipeline {
+    agent any
+
+    options {
+        disableConcurrentBuilds()
+    }
+
+    parameters {
+        string(
+            name: 'SOURCE_DIR',
+            defaultValue: '/workspace/keploy-app',
+            description: 'Use the mounted demo path, or . for an SCM checkout.'
+        )
+        string(
+            name: 'MINIKUBE_PROFILE',
+            defaultValue: 'minikube',
+            description: 'Local Minikube profile name.'
+        )
+    }
+
+    environment {
+        APP_IMAGE = "keploy-demo-notes:${BUILD_NUMBER}"
+        TEST_NAMESPACE = "keploy-demo-${BUILD_NUMBER}"
+    }
+
+    stages {
+        stage('Verify') {
+            steps {
+                dir("${params.SOURCE_DIR}") {
+                    sh '''
+                        set -eu
+                        test -f Dockerfile.keploy
+                        test -f k8s/record.yaml
+                        docker version
+                        kubectl version --client
+                        minikube status -p "$MINIKUBE_PROFILE"
+                        kubectl --context "$MINIKUBE_PROFILE" get nodes
+                    '''
+                }
+            }
+        }
+
+        stage('Build App') {
+            steps {
+                dir("${params.SOURCE_DIR}") {
+                    sh '''
+                        set -eu
+                        docker build --pull -f Dockerfile.keploy -t "$APP_IMAGE" .
+                        minikube image load -p "$MINIKUBE_PROFILE" "$APP_IMAGE"
+                    '''
+                }
+            }
+        }
+
+        stage('Keploy Record') {
+            steps {
+                dir("${params.SOURCE_DIR}") {
+                    sh '''
+                        set -eu
+                        kubectl --context "$MINIKUBE_PROFILE" create namespace "$TEST_NAMESPACE"
+                        sed "s|__APP_IMAGE__|$APP_IMAGE|g" k8s/record.yaml \
+                          | kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" apply -f -
+                        kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" \
+                          rollout status deployment/keploy-recorder --timeout=180s
+
+                        kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" run keploy-traffic \
+                          --rm -i --restart=Never \
+                          --image="$APP_IMAGE" --image-pull-policy=Never \
+                          --env=TARGET_URL=http://keploy-notes:8080 \
+                          --command -- node -e '
+                            const base = process.env.TARGET_URL;
+                            async function request(path, options = {}) {
+                              const response = await fetch(base + path, options);
+                              if (!response.ok) throw new Error(`${options.method || "GET"} ${path}: ${response.status}`);
+                            }
+                            async function main() {
+                              await request("/health");
+                              await request("/notes");
+                              await request("/notes", {
+                                method: "POST",
+                                headers: { "content-type": "application/json" },
+                                body: JSON.stringify({ title: "Minikube note", content: "Recorded by Keploy" })
+                              });
+                              await request("/notes/1");
+                            }
+                            main().catch((error) => { console.error(error); process.exit(1); });
+                          '
+
+                        sleep 5
+                        kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" \
+                          delete deployment keploy-recorder --timeout=60s
+                    '''
+                }
+            }
+        }
+
+        stage('Keploy Test') {
+            steps {
+                dir("${params.SOURCE_DIR}") {
+                    sh '''
+                        set -eu
+                        sed "s|__APP_IMAGE__|$APP_IMAGE|g" k8s/test.yaml \
+                          | kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" apply -f -
+
+                        TEST_STATUS=1
+                        for attempt in $(seq 1 120); do
+                            SUCCEEDED="$(kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" get job keploy-test -o jsonpath='{.status.succeeded}')"
+                            FAILED="$(kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" get job keploy-test -o jsonpath='{.status.failed}')"
+                            if [ "$SUCCEEDED" = "1" ]; then
+                                TEST_STATUS=0
+                                break
+                            fi
+                            if [ "$FAILED" = "1" ]; then
+                                break
+                            fi
+                            sleep 2
+                        done
+
+                        kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" logs job/keploy-test || true
+                        exit "$TEST_STATUS"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            sh '''
+                kubectl --context "$MINIKUBE_PROFILE" delete namespace "$TEST_NAMESPACE" --ignore-not-found --wait=false || true
+                minikube image rm -p "$MINIKUBE_PROFILE" "$APP_IMAGE" >/dev/null 2>&1 || true
+                docker image rm "$APP_IMAGE" >/dev/null 2>&1 || true
+            '''
+        }
+    }
+}
