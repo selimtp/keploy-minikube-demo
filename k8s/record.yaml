@@ -23,16 +23,16 @@ spec:
       labels:
         app: keploy-recorder
     spec:
-      hostPID: true
+      hostPID: __HOST_PID__
       containers:
         - name: app
           image: __APP_IMAGE__
           imagePullPolicy: Never
-          securityContext:
-            privileged: true
+          securityContext: __SECURITY_CONTEXT__
           command: ["/bin/sh", "-c"]
           args:
             - |
+              __NOISE_SETUP__
               mountpoint -q /sys/kernel/debug || mount -t debugfs debugfs /sys/kernel/debug
               mountpoint -q /sys/kernel/tracing || mount -t tracefs tracefs /sys/kernel/tracing
               exec keploy record --path /data --disableANSI -c "node /app/app.js"
@@ -42,10 +42,22 @@ spec:
           volumeMounts:
             - name: keploy-data
               mountPath: /data
+            - name: debugfs
+              mountPath: /sys/kernel/debug
+            - name: tracefs
+              mountPath: /sys/kernel/tracing
       volumes:
         - name: keploy-data
           persistentVolumeClaim:
             claimName: keploy-data
+        - name: debugfs
+          hostPath:
+            path: /sys/kernel/debug
+            type: Directory
+        - name: tracefs
+          hostPath:
+            path: /sys/kernel/tracing
+            type: Directory
 ---
 apiVersion: v1
 kind: Service

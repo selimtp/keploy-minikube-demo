@@ -22,7 +22,12 @@ app.get("/notes/:id", (req, res) => {
 app.post("/notes", (req, res) => {
   const { title, content } = req.body;
   if (!title) return res.status(400).json({ error: "title is required" });
-  const note = { id: nextId++, title, content: content || "" };
+  const note = {
+    id: nextId++,
+    title,
+    content: content || "",
+    createdAt: new Date().toISOString(),
+  };
   notes.push(note);
   res.status(201).json(note);
 });

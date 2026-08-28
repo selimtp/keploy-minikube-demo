@@ -1,0 +1,7 @@
+test:
+  globalNoise:
+    global:
+      body:
+        createdAt: []
+      header:
+        Date: []

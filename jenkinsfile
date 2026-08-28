@@ -8,7 +8,7 @@ pipeline {
     parameters {
         string(
             name: 'SOURCE_DIR',
-            defaultValue: '/workspace/keploy-minikube-demo',
+            defaultValue: '/workspace/keploy-app',
             description: 'Use the mounted demo path, or . for an SCM checkout.'
         )
         string(
@@ -16,12 +16,30 @@ pipeline {
             defaultValue: 'minikube',
             description: 'Local Minikube profile name.'
         )
+        choice(
+            name: 'SECURITY_MODE',
+            choices: ['minimal', 'caps-hostpid', 'privileged'],
+            description: 'Privilege ladder for the Keploy pods. Start at minimal and step down only if eBPF fails to load.'
+        )
+        booleanParam(
+            name: 'ENABLE_NOISE_CONFIG',
+            defaultValue: true,
+            description: 'Apply keploy.yml noise filtering. Uncheck to demonstrate the failure it prevents.'
+        )
+        string(
+            name: 'TEST_DELAY',
+            defaultValue: '5',
+            description: 'Seconds Keploy waits for the app to boot before replaying. Use 30-60 for a JVM application.'
+        )
     }
 
     environment {
         APP_IMAGE = "keploy-demo-notes:${BUILD_NUMBER}"
         TEST_NAMESPACE = "keploy-demo-${BUILD_NUMBER}"
         KUBECONFIG = '/var/jenkins_home/minikube-kubeconfig'
+        HOST_PID = "${params.SECURITY_MODE == 'minimal' ? 'false' : 'true'}"
+        SECURITY_CONTEXT = "${params.SECURITY_MODE == 'privileged' ? '{privileged: true}' : '{runAsUser: 0, capabilities: {add: [BPF, PERFMON, NET_ADMIN, SYS_RESOURCE]}}'}"
+        NOISE_SETUP = "${params.ENABLE_NOISE_CONFIG ? 'true' : 'rm -f /app/keploy.yml'}"
     }
 
     stages {
@@ -38,6 +56,10 @@ pipeline {
                         test -f k8s/record.yaml || {
                             echo "Missing $(pwd)/k8s/record.yaml"
                             find . -maxdepth 2 -type f -print
+                            exit 1
+                        }
+                        test -f keploy.yml || {
+                            echo "Missing $(pwd)/keploy.yml"
                             exit 1
                         }
                         docker version
@@ -74,8 +96,15 @@ pipeline {
                 dir("${params.SOURCE_DIR}") {
                     sh '''
                         set -eu
+                        echo "Security mode: $SECURITY_MODE (hostPID=$HOST_PID, securityContext=$SECURITY_CONTEXT)"
+                        echo "Noise config enabled: $ENABLE_NOISE_CONFIG"
+
                         kubectl --context "$MINIKUBE_PROFILE" create namespace "$TEST_NAMESPACE"
-                        sed "s|__APP_IMAGE__|$APP_IMAGE|g" k8s/record.yaml \
+                        sed -e "s|__APP_IMAGE__|$APP_IMAGE|g" \
+                            -e "s|__HOST_PID__|$HOST_PID|g" \
+                            -e "s|__SECURITY_CONTEXT__|$SECURITY_CONTEXT|g" \
+                            -e "s|__NOISE_SETUP__|$NOISE_SETUP|g" \
+                            k8s/record.yaml \
                           | kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" apply -f -
                         if ! kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" \
                           rollout status deployment/keploy-recorder --timeout=180s; then
@@ -133,7 +162,12 @@ pipeline {
                 dir("${params.SOURCE_DIR}") {
                     sh '''
                         set -eu
-                        sed "s|__APP_IMAGE__|$APP_IMAGE|g" k8s/test.yaml \
+                        sed -e "s|__APP_IMAGE__|$APP_IMAGE|g" \
+                            -e "s|__HOST_PID__|$HOST_PID|g" \
+                            -e "s|__SECURITY_CONTEXT__|$SECURITY_CONTEXT|g" \
+                            -e "s|__NOISE_SETUP__|$NOISE_SETUP|g" \
+                            -e "s|__TEST_DELAY__|$TEST_DELAY|g" \
+                            k8s/test.yaml \
                           | kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" apply -f -
 
                         TEST_STATUS=1
