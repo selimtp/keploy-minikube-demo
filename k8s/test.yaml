@@ -5,6 +5,13 @@ metadata:
 spec:
   backoffLimit: 0
   template:
+    metadata:
+      labels:
+        # Load-bearing, do not remove. The recorded test cases target
+        # http://keploy-notes:8080, so during replay the keploy-notes Service must
+        # resolve to this pod. The recorder Deployment is already gone by then, and
+        # this label is what makes the Service select the Job pod instead.
+        app: keploy-recorder
     spec:
       restartPolicy: Never
       hostPID: __HOST_PID__
