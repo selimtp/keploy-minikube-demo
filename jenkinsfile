@@ -8,8 +8,8 @@ pipeline {
     parameters {
         string(
             name: 'SOURCE_DIR',
-            defaultValue: '/workspace/keploy-app',
-            description: 'Use the mounted demo path, or . for an SCM checkout.'
+            defaultValue: '.',
+            description: 'Use the mounted demo path(/workspace/keploy-app), or . for an SCM checkout.'
         )
         string(
             name: 'MINIKUBE_PROFILE',
