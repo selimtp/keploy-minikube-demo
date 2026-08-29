@@ -27,6 +27,16 @@ spec:
               __NOISE_SETUP__
               mountpoint -q /sys/kernel/debug || mount -t debugfs debugfs /sys/kernel/debug
               mountpoint -q /sys/kernel/tracing || mount -t tracefs tracefs /sys/kernel/tracing
+              # Dumped here rather than during recording: Keploy flushes the test
+              # files when it shuts down, so they are only complete once the
+              # recorder Deployment is gone.
+              echo "===== Recorded test cases ====="
+              find /data -name '*.yaml' | sort | while read -r f; do
+                echo "--- $f"
+                cat "$f"
+              done
+              echo "===== End recorded test cases ====="
+
               keploy test --path /data --disableANSI --delay __TEST_DELAY__ -c "node /app/app.js" 2>&1 | tee /tmp/keploy-test.log
               KEPLOY_STATUS=${PIPESTATUS[0]}
               if grep -Eq 'Total test failed:[[:space:]]*[1-9][0-9]*' /tmp/keploy-test.log; then
