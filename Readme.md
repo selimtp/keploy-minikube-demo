@@ -82,7 +82,16 @@ This does not survive `minikube stop`. On a real cluster the equivalent is a pri
 
 ### Noise filtering
 
-`POST /notes` returns a `createdAt` timestamp, which differs on every replay. Without `keploy.yml` the recorded and replayed responses never match and the tests fail—the first problem any real service hits. `keploy.yml` marks that field, and the `Date` header, as noise.
+`POST /notes` returns a `createdAt` timestamp, which differs on every replay. Without `keploy.yml` the recorded and replayed responses never match and the tests fail—the first problem any real service hits. `keploy.yml` marks that field as noise.
+
+Masking the field is not sufficient on its own. Express derives the `Etag` header from a hash of the response body, so a changing `createdAt` produces a changing `Etag` even once the body comparison passes. The symptom is a test that fails on a header diff with no body diff, and with both ETags reporting the same length:
+
+```
+EXPECT: W/"66-pC+BGZOo2VL5A49LObgbNtLVp6Q"
+ACTUAL: W/"66-t4uyrNNs9W34IrQ8xTHC60lAOZ4"
+```
+
+`keploy.yml` therefore lists `Etag` as noise as well. The general rule: anything computed from a noisy field—ETags, `Content-Length`, checksums, signature headers—has to be masked alongside it.
 
 Run the pipeline once with `ENABLE_NOISE_CONFIG` unchecked to see the failure, then once with it checked to see it resolved. When unchecked, the file is deleted inside the pod at startup, so no image rebuild is needed.
 

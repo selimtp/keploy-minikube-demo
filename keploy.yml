@@ -5,3 +5,7 @@ test:
         createdAt: []
       header:
         Date: []
+        # Etag is a hash of the response body. Masking createdAt in the body is not
+        # enough on its own: the body still changes, so the derived Etag changes too.
+        # Anything computed from a noisy field has to be listed here as well.
+        Etag: []
