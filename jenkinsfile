@@ -150,6 +150,13 @@ pipeline {
                           '
 
                         sleep 5
+
+                        echo "===== Recorded test cases ====="
+                        kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" \
+                          exec deployment/keploy-recorder -- \
+                          sh -c 'find /data -name "*.yaml" | sort | while read f; do echo "--- $f"; cat "$f"; done' || true
+                        echo "===== End recorded test cases ====="
+
                         kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" \
                           delete deployment keploy-recorder --timeout=60s
                     '''
