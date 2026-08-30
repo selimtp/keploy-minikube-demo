@@ -40,6 +40,7 @@ pipeline {
 
     environment {
         APP_IMAGE = "keploy-demo-notes:${BUILD_NUMBER}"
+        POSTGRES_IMAGE = 'postgres:16-alpine'
         TEST_NAMESPACE = "keploy-demo-${BUILD_NUMBER}"
         KUBECONFIG = '/var/jenkins_home/minikube-kubeconfig'
         HOST_PID = "${params.SECURITY_MODE == 'minimal' ? 'false' : 'true'}"
@@ -92,6 +93,11 @@ pipeline {
                         done
                         test "$BUILD_STATUS" -eq 0
                         docker save "$APP_IMAGE" | docker exec -i minikube docker load
+
+                        # Preloaded the same way as the app image so the Minikube
+                        # node never needs registry access of its own.
+                        docker pull "$POSTGRES_IMAGE"
+                        docker save "$POSTGRES_IMAGE" | docker exec -i minikube docker load
                     '''
                 }
             }
@@ -113,6 +119,9 @@ pipeline {
                             -e "s|__NOISE_SETUP__|$NOISE_SETUP|g" \
                             k8s/record.yaml \
                           | kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" apply -f -
+                        kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" \
+                          rollout status deployment/postgres --timeout=180s
+
                         if ! kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" \
                           rollout status deployment/keploy-recorder --timeout=180s; then
                             echo "Keploy recorder did not become ready"

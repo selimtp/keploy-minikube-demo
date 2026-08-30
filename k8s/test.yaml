@@ -15,6 +15,8 @@ spec:
     spec:
       restartPolicy: Never
       hostPID: __HOST_PID__
+      # Deliberately no Postgres and no wait-for-postgres init container. If the
+      # replay succeeds here, every database call was served from a recorded mock.
       containers:
         - name: app
           image: __APP_IMAGE__
@@ -27,19 +29,26 @@ spec:
               __NOISE_SETUP__
               mountpoint -q /sys/kernel/debug || mount -t debugfs debugfs /sys/kernel/debug
               mountpoint -q /sys/kernel/tracing || mount -t tracefs tracefs /sys/kernel/tracing
+
               # Dumped here rather than during recording: Keploy flushes the test
               # files when it shuts down, so they are only complete once the
               # recorder Deployment is gone.
               echo "===== Recorded test cases ====="
-              find /data -name '*.yaml' | sort | while read -r f; do
+              find /data/keploy -path '*/tests/*.yaml' | sort | while read -r f; do
                 echo "--- $f"
                 cat "$f"
               done
               echo "===== End recorded test cases ====="
 
-              # Applied to this pod only, and only after recording finished, so the
-              # recorded expectation still says "ok" while the replayed application
-              # answers "healthy". Keploy is supposed to fail test-1 on this.
+              # Proof that the Postgres conversation was captured. Summarised by
+              # kind because the full wire-protocol dump is very large.
+              echo "===== Recorded mocks ====="
+              find /data/keploy -name 'mocks.yaml' | sort | while read -r f; do
+                echo "--- $f ($(wc -l < "$f") lines)"
+                grep -h '^kind:' "$f" | sort | uniq -c
+              done
+              echo "=========================="
+
               __REGRESSION_SETUP__
 
               # Proof of what the replayed application will actually answer. Reads
@@ -55,9 +64,9 @@ spec:
               # Must stay directly after the PIPESTATUS capture above: any command
               # in between overwrites it and Keploy's exit code is lost.
               echo "===== Coverage output ====="
-              ls -la /app/.nyc_output /app/coverage 2>/dev/null || true
               nyc report --reporter=text --temp-directory=/app/.nyc_output || true
               echo "=========================="
+
               if grep -Eq 'Total test failed:[[:space:]]*[1-9][0-9]*' /tmp/keploy-test.log; then
                 echo "Keploy reported failed tests"
                 exit 1

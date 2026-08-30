@@ -12,6 +12,47 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  name: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_USER
+              value: keploy
+            - name: POSTGRES_PASSWORD
+              value: keploy
+            - name: POSTGRES_DB
+              value: keploy
+          ports:
+            - name: postgres
+              containerPort: 5432
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
   name: keploy-recorder
 spec:
   replicas: 1
@@ -24,6 +65,13 @@ spec:
         app: keploy-recorder
     spec:
       hostPID: __HOST_PID__
+      # Without this the application can start before Postgres accepts
+      # connections, and its failed retries end up in the recorded mocks.
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "until pg_isready -h postgres -U keploy; do sleep 1; done"]
       containers:
         - name: app
           image: __APP_IMAGE__
