@@ -57,6 +57,7 @@ Every build uses a separate namespace named `keploy-demo-<build-number>`. The `p
 | `SECURITY_MODE` | `minimal` | Privilege level of the Keploy pods. See below. |
 | `ENABLE_NOISE_CONFIG` | checked | Applies `keploy.yml`. Uncheck to demonstrate the failure it prevents. |
 | `TEST_DELAY` | `5` | Seconds Keploy waits for the app to boot before replaying. |
+| `INJECT_REGRESSION` | unchecked | Deliberately breaks `/health` during replay. A red build is the expected result. |
 
 ### Privilege ladder
 
@@ -82,18 +83,48 @@ This does not survive `minikube stop`. On a real cluster the equivalent is a pri
 
 ### Noise filtering
 
-`POST /notes` returns a `createdAt` timestamp, which differs on every replay. Without `keploy.yml` the recorded and replayed responses never match and the tests fail—the first problem any real service hits. `keploy.yml` marks that field as noise.
+`POST /notes` returns a `createdAt` timestamp, which differs on every replay.
 
-Masking the field is not sufficient on its own. Express derives the `Etag` header from a hash of the response body, so a changing `createdAt` produces a changing `Etag` even once the body comparison passes. The symptom is a test that fails on a header diff with no body diff, and with both ETags reporting the same length:
+Keploy handles the field itself. At record time it detects timestamp-like values and writes them into the test case, which is why the generated `keploy/test-set-0/tests/test-3.yaml` contains this without anyone configuring it:
+
+```yaml
+    assertions:
+        noise:
+            body.createdAt: []
+            header.Date: []
+```
+
+`test-1.yaml` and `test-2.yaml` carry only `header.Date`, because their response bodies contain no timestamp. The detection is per-response, not a blanket rule.
+
+What Keploy does not detect is a value *derived* from a noisy field. Express computes `Etag` as a hash of the response body, so a changing `createdAt` produces a changing `Etag` even though the body comparison passes. The symptom is a test failing on a header diff with no body diff, both ETags reporting the same length:
 
 ```
 EXPECT: W/"66-pC+BGZOo2VL5A49LObgbNtLVp6Q"
 ACTUAL: W/"66-t4uyrNNs9W34IrQ8xTHC60lAOZ4"
 ```
 
-`keploy.yml` therefore lists `Etag` as noise as well. The general rule: anything computed from a noisy field—ETags, `Content-Length`, checksums, signature headers—has to be masked alongside it.
+`Etag` is therefore the only entry in `keploy.yml`. The general rule: anything computed from a noisy field—ETags, checksums, signature headers, `Content-Length` where the length is not fixed—has to be masked by hand.
+
+Automatic detection cuts both ways. A field Keploy decides is a timestamp will be masked whether or not the value matters to you, and a wrong value there passes silently. Read the `assertions.noise` block of the generated test cases before trusting a green run.
 
 Run the pipeline once with `ENABLE_NOISE_CONFIG` unchecked to see the failure, then once with it checked to see it resolved. When unchecked, the file is deleted inside the pod at startup, so no image rebuild is needed.
+
+### Regression canary
+
+Noise filtering answers the question "does Keploy ignore what should be ignored". `INJECT_REGRESSION` answers the opposite and more important one: does it catch a change that matters.
+
+When checked, the test pod runs `sed -i s/ok/healthy/ /app/app.js` before replaying. The edit lands only in the test pod, only after recording is complete, so the recorded expectation still reads `{"status":"ok"}` while the replayed application answers `{"status":"healthy"}`.
+
+`/health` was chosen because `test-1.yaml` carries only `header.Date` in its `assertions.noise` block. Nothing about the field is auto-masked, so the comparison is genuinely exercised.
+
+Read the result the other way round from a normal build:
+
+| Outcome | Meaning |
+| --- | --- |
+| `test-1` fails on a body diff | Correct. Keploy detects real changes. |
+| Build is green | Keploy is not comparing this body. Investigate before trusting any green run. |
+
+Expect the diff to cover the body and `Content-Length` (15 bytes becomes 20). `Etag` changes too but is masked by `keploy.yml`.
 
 ## Moving to a JVM application
 

@@ -31,6 +31,11 @@ pipeline {
             defaultValue: '5',
             description: 'Seconds Keploy waits for the app to boot before replaying. Use 30-60 for a JVM application.'
         )
+        booleanParam(
+            name: 'INJECT_REGRESSION',
+            defaultValue: false,
+            description: 'Break /health inside the test pod only, after recording. A RED build is the expected result: it proves Keploy detects a real change. A green build means it does not.'
+        )
     }
 
     environment {
@@ -40,6 +45,7 @@ pipeline {
         HOST_PID = "${params.SECURITY_MODE == 'minimal' ? 'false' : 'true'}"
         SECURITY_CONTEXT = "${params.SECURITY_MODE == 'privileged' ? '{privileged: true}' : '{runAsUser: 0, capabilities: {add: [BPF, PERFMON, NET_ADMIN, SYS_RESOURCE]}}'}"
         NOISE_SETUP = "${params.ENABLE_NOISE_CONFIG ? 'true' : 'rm -f /app/keploy.yml'}"
+        REGRESSION_SETUP = "${params.INJECT_REGRESSION ? 'sed -i s/ok/healthy/ /app/app.js' : 'true'}"
     }
 
     stages {
@@ -166,6 +172,7 @@ pipeline {
                             -e "s|__HOST_PID__|$HOST_PID|g" \
                             -e "s|__SECURITY_CONTEXT__|$SECURITY_CONTEXT|g" \
                             -e "s|__NOISE_SETUP__|$NOISE_SETUP|g" \
+                            -e "s|__REGRESSION_SETUP__|$REGRESSION_SETUP|g" \
                             -e "s|__TEST_DELAY__|$TEST_DELAY|g" \
                             k8s/test.yaml \
                           | kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" apply -f -
