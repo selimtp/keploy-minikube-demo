@@ -37,6 +37,18 @@ spec:
               done
               echo "===== End recorded test cases ====="
 
+              # Applied to this pod only, and only after recording finished, so the
+              # recorded expectation still says "ok" while the replayed application
+              # answers "healthy". Keploy is supposed to fail test-1 on this.
+              __REGRESSION_SETUP__
+
+              # Proof of what the replayed application will actually answer. Reads
+              # "ok" when no regression was injected, "healthy" when one was. If the
+              # substitution never happened, a green build means nothing.
+              echo "===== /health source after regression setup ====="
+              grep -n status /app/app.js
+              echo "================================================="
+
               keploy test --path /data --disableANSI --delay __TEST_DELAY__ -c "node /app/app.js" 2>&1 | tee /tmp/keploy-test.log
               KEPLOY_STATUS=${PIPESTATUS[0]}
               if grep -Eq 'Total test failed:[[:space:]]*[1-9][0-9]*' /tmp/keploy-test.log; then
