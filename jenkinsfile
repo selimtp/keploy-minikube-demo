@@ -104,6 +104,7 @@ pipeline {
                         set -eu
                         echo "Security mode: $SECURITY_MODE (hostPID=$HOST_PID, securityContext=$SECURITY_CONTEXT)"
                         echo "Noise config enabled: $ENABLE_NOISE_CONFIG"
+                        echo "Regression injected: $INJECT_REGRESSION"
 
                         kubectl --context "$MINIKUBE_PROFILE" create namespace "$TEST_NAMESPACE"
                         sed -e "s|__APP_IMAGE__|$APP_IMAGE|g" \
