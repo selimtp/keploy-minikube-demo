@@ -15,7 +15,11 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY package.json ./
-RUN npm install --omit=dev
+# nyc is what Keploy shells out to for JavaScript coverage. Without it, keploy test
+# logs "coverage tool not found" and skips the calculation. The Java equivalent is
+# the JaCoCo agent.
+RUN npm install --omit=dev \
+    && npm install -g nyc
 COPY app.js ./
 COPY keploy.yml ./
 

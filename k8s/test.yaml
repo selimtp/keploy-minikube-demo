@@ -51,6 +51,13 @@ spec:
 
               keploy test --path /data --disableANSI --delay __TEST_DELAY__ -c "node /app/app.js" 2>&1 | tee /tmp/keploy-test.log
               KEPLOY_STATUS=${PIPESTATUS[0]}
+
+              # Must stay directly after the PIPESTATUS capture above: any command
+              # in between overwrites it and Keploy's exit code is lost.
+              echo "===== Coverage output ====="
+              ls -la /app/.nyc_output /app/coverage 2>/dev/null || true
+              nyc report --reporter=text --temp-directory=/app/.nyc_output || true
+              echo "=========================="
               if grep -Eq 'Total test failed:[[:space:]]*[1-9][0-9]*' /tmp/keploy-test.log; then
                 echo "Keploy reported failed tests"
                 exit 1
