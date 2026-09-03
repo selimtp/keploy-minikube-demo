@@ -75,6 +75,19 @@ spec:
 
               # Must stay directly after the PIPESTATUS capture above: any command
               # in between overwrites it and Keploy's exit code is lost.
+              # Separates the two reasons a coverage report reads 0%: nyc never
+              # collected anything (no .json files here, so the application was
+              # not instrumented or was killed before it could flush), versus data
+              # exists but nyc report is pointed somewhere else. Without this the
+              # two are indistinguishable in the log.
+              echo "===== nyc raw coverage data ====="
+              echo "cwd: $(pwd)"
+              ls -la /app/.nyc_output 2>&1 | head -20
+              echo "json files: $(find /app/.nyc_output -name '*.json' 2>/dev/null | wc -l)"
+              echo "other candidate locations:"
+              find / -maxdepth 4 -name '.nyc_output' -o -maxdepth 4 -name 'coverage' 2>/dev/null | head
+              echo "================================="
+
               echo "===== Coverage output ====="
               nyc report --reporter=text --temp-directory=/app/.nyc_output || true
               echo "=========================="

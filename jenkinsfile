@@ -199,18 +199,28 @@ pipeline {
                         kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" \
                           delete deployment keploy-recorder --timeout=60s
 
-                        # Nothing else in the namespace mounts the recording
-                        # volume at this point, so a throwaway pod is the only way
-                        # to read it. Deliberately dumped per round: after round 1
-                        # the volume holds test-set-0, after round 2 it holds
-                        # test-set-0 and test-set-1, and the difference between
-                        # the two logs is the answer to "what does recording twice
-                        # do". The overrides JSON only exists to attach the PVC,
-                        # which plain kubectl run flags cannot express.
-                        kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" run "keploy-dump-$round" \
-                          --rm -i --restart=Never \
-                          --image="$APP_IMAGE" --image-pull-policy=Never \
-                          --overrides='{"spec":{"volumes":[{"name":"keploy-data","persistentVolumeClaim":{"claimName":"keploy-data"}}],"containers":[{"name":"dump","image":"'"$APP_IMAGE"'","imagePullPolicy":"Never","volumeMounts":[{"name":"keploy-data","mountPath":"/data","readOnly":true}],"command":["sh","-c","ls -lR /data/keploy; echo ===== TEST CASES =====; for f in /data/keploy/test-set-*/tests/*.yaml; do echo FILE: $f; cat $f; done; echo ===== MOCK KINDS =====; grep -h ^kind: /data/keploy/test-set-*/mocks.yaml | sort | uniq -c"]}]}}' \
+                        # Nothing else in the namespace mounts the recording volume
+                        # once the recorder is gone, so this pod exists purely to
+                        # keep it readable. It outlives the whole build: the post
+                        # block copies the real files out through it after the
+                        # replay has added its reports. The overrides JSON is only
+                        # here to attach the PVC, which plain kubectl run flags
+                        # cannot express.
+                        if ! kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" get pod keploy-dump >/dev/null 2>&1; then
+                            kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" run keploy-dump \
+                              --restart=Never \
+                              --image="$APP_IMAGE" --image-pull-policy=Never \
+                              --overrides='{"spec":{"volumes":[{"name":"keploy-data","persistentVolumeClaim":{"claimName":"keploy-data"}}],"containers":[{"name":"dump","image":"'"$APP_IMAGE"'","imagePullPolicy":"Never","volumeMounts":[{"name":"keploy-data","mountPath":"/data","readOnly":true}],"command":["sleep","infinity"]}]}}'
+                            kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" \
+                              wait --for=condition=Ready pod/keploy-dump --timeout=120s
+                        fi
+
+                        # Dumped per round on purpose: after round 1 the volume
+                        # holds test-set-0, after round 2 it holds test-set-0 and
+                        # test-set-1. The difference between the two logs is the
+                        # answer to "what does recording twice do".
+                        kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" exec pod/keploy-dump \
+                          -- sh -c 'ls -lR /data/keploy; echo ===== TEST CASES =====; for f in /data/keploy/test-set-*/tests/*.yaml; do echo FILE: $f; cat $f; done; echo ===== MOCK KINDS =====; grep -h ^kind: /data/keploy/test-set-*/mocks.yaml | sort | uniq -c' \
                           | tee "$WORKSPACE/keploy-output/record-round-$round.log"
                         done
 
@@ -298,9 +308,27 @@ pipeline {
 
     post {
         always {
-            // Runs before the namespace teardown below, and on red builds too:
-            // an injected regression is exactly when the recorded cases and the
-            // failure diff are worth keeping.
+            // Copied through the parking pod rather than reprinted into a log:
+            // this is the volume itself, so the archive contains the real
+            // test-set yaml files, mocks.yaml and the replay reports as browsable
+            // files. Runs before the namespace teardown below and tolerates a
+            // missing pod, because a build that died during Build App never
+            // created one.
+            sh '''
+                set -u
+                mkdir -p "$WORKSPACE/keploy-output"
+                if kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" get pod keploy-dump >/dev/null 2>&1; then
+                    kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" \
+                      cp keploy-dump:/data/keploy "$WORKSPACE/keploy-output/keploy-volume" || true
+                    echo "===== Archived volume tree ====="
+                    find "$WORKSPACE/keploy-output/keploy-volume" -type f | sort || true
+                else
+                    echo "No keploy-dump pod in $TEST_NAMESPACE; nothing to copy."
+                fi
+            '''
+
+            // On red builds too: an injected regression is exactly when the
+            // recorded cases and the failure diff are worth keeping.
             archiveArtifacts artifacts: 'keploy-output/**', allowEmptyArchive: true, fingerprint: false
 
             sh '''

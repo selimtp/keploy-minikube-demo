@@ -65,8 +65,11 @@ The namespace and its volume are destroyed at the end of every build, so the arc
 
 | Artifact | Written | Contents |
 | --- | --- | --- |
+| `keploy-output/keploy-volume/` | `post` block, after the replay | **The volume itself as real files** — `test-set-N/tests/*.yaml`, `test-set-N/mocks.yaml`, `reports/test-run-N/*.yaml` |
 | `keploy-output/record-round-N.log` | End of each record round, after the recorder is deleted | `ls -lR` of the volume, full text of every generated test case, mock `kind` breakdown |
 | `keploy-output/test-run-N.log` | After each replay | Test-set inventory, replay output, coverage report, report directories and summaries |
+
+The first one is what to open when the question is "show me the generated tests"; the logs are for reading the story of a single build. A `keploy-dump` pod created during the Record stage keeps the volume mounted for the whole build so `kubectl cp` can reach it after the namespace's other pods are gone.
 
 The record dump runs after the recorder is deleted because Keploy flushes its test files on shutdown; reading the volume any earlier shows an empty or partial test-set.
 
