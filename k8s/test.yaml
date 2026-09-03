@@ -1,7 +1,9 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: keploy-test
+  # Suffixed because a Job is immutable: replaying the same recordings a second
+  # time needs a second Job, not an update to this one.
+  name: keploy-test-__RUN_ID__
 spec:
   backoffLimit: 0
   template:
@@ -29,6 +31,16 @@ spec:
               __NOISE_SETUP__
               mountpoint -q /sys/kernel/debug || mount -t debugfs debugfs /sys/kernel/debug
               mountpoint -q /sys/kernel/tracing || mount -t tracefs tracefs /sys/kernel/tracing
+
+              # One line per test-set. Recording twice never overwrites: Keploy
+              # takes the next free number, so a second recorder lifecycle adds
+              # test-set-1 next to test-set-0 and this replay runs both.
+              echo "===== Test sets on the volume ====="
+              for d in /data/keploy/test-set-*; do
+                test -d "$d" || continue
+                echo "$d: $(find "$d/tests" -name '*.yaml' | wc -l) test cases"
+              done
+              echo "==================================="
 
               # Dumped here rather than during recording: Keploy flushes the test
               # files when it shuts down, so they are only complete once the
@@ -66,6 +78,18 @@ spec:
               echo "===== Coverage output ====="
               nyc report --reporter=text --temp-directory=/app/.nyc_output || true
               echo "=========================="
+
+              # Replaying does not touch tests/ or mocks.yaml; the only thing a
+              # run writes is a report directory. Running twice therefore leaves
+              # two of them side by side rather than replacing the first.
+              echo "===== Report directories ====="
+              find /data/keploy/reports -type f | sort
+              echo "===== Report summaries ====="
+              find /data/keploy/reports -name '*report.yaml' | sort | while read -r f; do
+                echo "--- $f"
+                grep -E '^(status|success|failure|total|ignored):' "$f" || true
+              done
+              echo "=============================="
 
               if grep -Eq 'Total test failed:[[:space:]]*[1-9][0-9]*' /tmp/keploy-test.log; then
                 echo "Keploy reported failed tests"

@@ -54,10 +54,21 @@ The record stage echoes the effective values, so check the top of the log rather
 
 1. **Verify** — checks Docker, Kubectl, cluster access, and that the expected files exist.
 2. **Build App** — builds the Keploy image and loads it into the Minikube node's Docker runtime, then does the same for the Postgres image so the node needs no registry access.
-3. **Keploy Record** — creates an isolated namespace, starts Postgres, waits for it, starts the app under Keploy, drives traffic from a separate pod, then deletes the recorder.
-4. **Keploy Test** — dumps the recorded test cases and mock summary, replays in a Job, reports coverage, and fails Jenkins if Keploy fails.
+3. **Keploy Record** — creates an isolated namespace, then runs `RECORD_ROUNDS` recorder lifecycles. Each one starts Postgres, waits for it, starts the app under Keploy, drives traffic from a separate pod, deletes the recorder, and dumps the volume. After the last round it deletes Postgres so nothing reachable remains for the replay.
+4. **Keploy Test** — replays `TEST_ROUNDS` times. Each run dumps the test-set inventory, the recorded test cases, the mock summary and the report directories, then reports coverage. Jenkins fails if any run fails.
 
-Every build uses a namespace named `keploy-demo-<build-number>`. The `post` block removes the namespace and the app image even when a stage fails.
+Every build uses a namespace named `keploy-demo-<build-number>`. The `post` block archives the Keploy logs, then removes the namespace and the app image, even when a stage fails.
+
+### What the build leaves behind
+
+The namespace and its volume are destroyed at the end of every build, so the archived artifacts are the only durable record:
+
+| Artifact | Written | Contents |
+| --- | --- | --- |
+| `keploy-output/record-round-N.log` | End of each record round, after the recorder is deleted | `ls -lR` of the volume, full text of every generated test case, mock `kind` breakdown |
+| `keploy-output/test-run-N.log` | After each replay | Test-set inventory, replay output, coverage report, report directories and summaries |
+
+The record dump runs after the recorder is deleted because Keploy flushes its test files on shutdown; reading the volume any earlier shows an empty or partial test-set.
 
 ## 4. Build parameters
 
@@ -68,6 +79,26 @@ Every build uses a namespace named `keploy-demo-<build-number>`. The `post` bloc
 | `ENABLE_NOISE_CONFIG` | checked | Applies `keploy.yml`. |
 | `TEST_DELAY` | `5` | Seconds Keploy waits for the app to boot. Use 30-60 for a JVM. |
 | `INJECT_REGRESSION` | unchecked | Breaks `/health` during replay. A red build is the expected result. |
+| `RECORD_ROUNDS` | `1` | Number of recorder lifecycles. `2` produces a second test-set. |
+| `TEST_ROUNDS` | `1` | Number of replays of the same recordings. `2` proves replay is deterministic. |
+
+New parameters do not appear on the build form until one build has run with the updated `Jenkinsfile` in place. That first build uses the defaults.
+
+### Recording twice, testing twice
+
+Keploy never overwrites an existing recording. Three cases are easy to confuse:
+
+| Action | Effect on disk | Effect on replay |
+| --- | --- | --- |
+| More traffic into a running recorder | Cases appended to `test-set-0` | One larger test-set |
+| A second recorder lifecycle | `test-set-1` created, `test-set-0` untouched | `keploy test` runs **both** sets |
+| A second `keploy test` | Only a new `reports/test-run-N` directory | None |
+
+A test-set is closed when the recorder shuts down, not when traffic stops—which is why `RECORD_ROUNDS` repeats the whole apply/drive/delete cycle rather than just resending requests. Compare `record-round-1.log` with `record-round-2.log` to see the second set appear.
+
+Select a single set with `keploy test --testsets test-set-1`. Without it, every set on the volume is replayed.
+
+Two runs of the same recordings must produce identical results: there is no database in the replay environment and every response comes from a mock. A difference between `test-run-1.log` and `test-run-2.log` is not flakiness, it is an unmasked derived field—the same class of problem as the ETag case below.
 
 ### Privilege ladder
 
@@ -123,7 +154,9 @@ Run once with `ENABLE_NOISE_CONFIG` unchecked to see the failure, then once chec
 
 Noise filtering answers "does Keploy ignore what should be ignored". `INJECT_REGRESSION` answers the more important opposite: does it catch a change that matters.
 
-When checked, the test pod runs `sed -i s/ok/healthy/ /app/app.js` before replaying. The edit lands only in the test pod and only after recording, so the recorded expectation still reads `{"status":"ok"}` while the replayed application answers `{"status":"healthy"}`. `ok` appears nowhere else in `app.js`, so the unquoted expression touches only that line—no shell quoting to get wrong across the Groovy, shell, sed and YAML layers.
+When checked, the test pod runs `sed -i s/ok/healthy/ /app/app.js` before replaying. The edit lands only in the test pod and only after recording, so the recorded expectation still reads `{"status":"ok"}` while the replayed application answers `{"status":"healthy"}`. The expression is deliberately unquoted, because the value travels through Groovy, the shell, an outer `sed` and YAML before it runs, and a quote escaped wrongly at any of those layers produces a broken manifest.
+
+That relies on `ok` appearing exactly once in `app.js`, inside `"ok"`. The substring is easy to reintroduce by accident—`look`, `token`, `book` all contain it—and `sed` would rewrite the first occurrence on every matching line. **Keep `app.js` free of the substring elsewhere, comments included, or switch to a line-addressed expression such as `sed -i /health/,+1s/ok/healthy/`.**
 
 `/health` was chosen because its test carries only `header.Date` as noise and does not touch the database. Nothing is auto-masked, so the comparison is genuinely exercised.
 
@@ -154,6 +187,8 @@ The application talks to Postgres, and this is the part of Keploy that matters m
 `k8s/record.yaml` deploys Postgres alongside the recorder and an init container blocks the app until `pg_isready` succeeds—without it the app's failed connection retries end up in the recorded mocks.
 
 `k8s/test.yaml` deploys **no Postgres at all**. If the replay passes there, every query, including the `CREATE TABLE` issued before `listen`, was served from `mocks.yaml`. The Job prints a summary of the recorded mocks by kind before replaying, so the Postgres traffic is visible in the log rather than inferred.
+
+That claim used to have a hole. The test manifest creates no Postgres, but the Deployment and Service from `k8s/record.yaml` stayed in the namespace through the replay: `app.js` defaults to host `postgres`, the name still resolved, and the real database still accepted connections. The replay almost certainly served everything from mocks regardless, but nothing proved it—and a query that failed to match a mock could quietly reach the real database and make a broken mock look green. The Record stage now deletes the Postgres Deployment and Service after the last round and prints `get pods,svc`, so the replay demonstrably has nothing to fall back on.
 
 Keploy intercepts at the wire-protocol level rather than through the driver, so this result carries to any language that speaks the same protocol.
 

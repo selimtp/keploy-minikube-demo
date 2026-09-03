@@ -36,6 +36,16 @@ pipeline {
             defaultValue: false,
             description: 'Break /health inside the test pod only, after recording. A RED build is the expected result: it proves Keploy detects a real change. A green build means it does not.'
         )
+        string(
+            name: 'RECORD_ROUNDS',
+            defaultValue: '1',
+            description: 'How many full recorder lifecycles to run. Each one produces its own test-set, so 2 answers "what happens if we record twice": test-set-1 appears next to test-set-0 and the replay runs both.'
+        )
+        string(
+            name: 'TEST_ROUNDS',
+            defaultValue: '1',
+            description: 'How many times to replay the same recordings. Each run only adds a report directory, so 2 answers "what happens if we test twice" and proves replay is deterministic.'
+        )
     }
 
     environment {
@@ -55,6 +65,13 @@ pipeline {
                 dir("${params.SOURCE_DIR}") {
                     sh '''
                         set -eu
+                        # Cleared here rather than in the Keploy Test stage: if the
+                        # build dies before replaying, the post block must not
+                        # archive the previous build's logs as if they were this
+                        # build's evidence.
+                        rm -rf "$WORKSPACE/keploy-output"
+                        mkdir -p "$WORKSPACE/keploy-output"
+
                         test -f Dockerfile.keploy || {
                             echo "Missing $(pwd)/Dockerfile.keploy"
                             ls -la
@@ -111,8 +128,18 @@ pipeline {
                         echo "Security mode: $SECURITY_MODE (hostPID=$HOST_PID, securityContext=$SECURITY_CONTEXT)"
                         echo "Noise config enabled: $ENABLE_NOISE_CONFIG"
                         echo "Regression injected: $INJECT_REGRESSION"
+                        echo "Record rounds: $RECORD_ROUNDS"
 
                         kubectl --context "$MINIKUBE_PROFILE" create namespace "$TEST_NAMESPACE"
+
+                        # A test-set is closed when the recorder shuts down, not
+                        # when traffic stops. Sending the same requests twice into
+                        # one running recorder would only append cases to
+                        # test-set-0; a second test-set needs a second lifecycle,
+                        # which is why the whole apply/drive/delete block is what
+                        # repeats here.
+                        for round in $(seq 1 "$RECORD_ROUNDS"); do
+                        echo "===== Record round $round of $RECORD_ROUNDS ====="
                         sed -e "s|__APP_IMAGE__|$APP_IMAGE|g" \
                             -e "s|__HOST_PID__|$HOST_PID|g" \
                             -e "s|__SECURITY_CONTEXT__|$SECURITY_CONTEXT|g" \
@@ -132,7 +159,7 @@ pipeline {
                             exit 1
                         fi
 
-                        kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" run keploy-traffic \
+                        kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" run "keploy-traffic-$round" \
                           --rm -i --restart=Never \
                           --image="$APP_IMAGE" --image-pull-policy=Never \
                           --env=TARGET_URL=http://keploy-notes:8080 \
@@ -166,8 +193,41 @@ pipeline {
                           '
 
                         sleep 5
+                        # Deleting the recorder is what makes Keploy flush the
+                        # test files. Reading the volume before this point shows
+                        # an empty or partial test-set.
                         kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" \
                           delete deployment keploy-recorder --timeout=60s
+
+                        # Nothing else in the namespace mounts the recording
+                        # volume at this point, so a throwaway pod is the only way
+                        # to read it. Deliberately dumped per round: after round 1
+                        # the volume holds test-set-0, after round 2 it holds
+                        # test-set-0 and test-set-1, and the difference between
+                        # the two logs is the answer to "what does recording twice
+                        # do". The overrides JSON only exists to attach the PVC,
+                        # which plain kubectl run flags cannot express.
+                        kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" run "keploy-dump-$round" \
+                          --rm -i --restart=Never \
+                          --image="$APP_IMAGE" --image-pull-policy=Never \
+                          --overrides='{"spec":{"volumes":[{"name":"keploy-data","persistentVolumeClaim":{"claimName":"keploy-data"}}],"containers":[{"name":"dump","image":"'"$APP_IMAGE"'","imagePullPolicy":"Never","volumeMounts":[{"name":"keploy-data","mountPath":"/data","readOnly":true}],"command":["sh","-c","ls -lR /data/keploy; echo ===== TEST CASES =====; for f in /data/keploy/test-set-*/tests/*.yaml; do echo FILE: $f; cat $f; done; echo ===== MOCK KINDS =====; grep -h ^kind: /data/keploy/test-set-*/mocks.yaml | sort | uniq -c"]}]}}' \
+                          | tee "$WORKSPACE/keploy-output/record-round-$round.log"
+                        done
+
+                        # Torn down after the last round, before any replay. The
+                        # test manifest never creates Postgres, but until this
+                        # existed the Deployment and Service from record.yaml
+                        # survived into the replay: app.js defaults to host
+                        # "postgres", the name still resolved, and the real
+                        # database still accepted connections. Replay very likely
+                        # served everything from mocks anyway, but nothing proved
+                        # it, and a query that failed to match a mock could reach
+                        # the real database and turn a broken mock green.
+                        # Removing it is what makes "no database in the replay
+                        # environment" a checked fact rather than an assumption.
+                        kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" \
+                          delete deployment/postgres service/postgres --timeout=60s
+                        kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" get pods,svc
                     '''
                 }
             }
@@ -178,19 +238,31 @@ pipeline {
                 dir("${params.SOURCE_DIR}") {
                     sh '''
                         set -eu
+                        echo "Test rounds: $TEST_ROUNDS"
+
+                        # The job log is the only durable record of what Keploy
+                        # produced: the namespace and its volume are destroyed in
+                        # the post block. Written under WORKSPACE rather than
+                        # SOURCE_DIR because archiveArtifacts resolves paths there.
+                        mkdir -p "$WORKSPACE/keploy-output"
+
+                        OVERALL=0
+                        for run in $(seq 1 "$TEST_ROUNDS"); do
+                        echo "===== Test run $run of $TEST_ROUNDS ====="
                         sed -e "s|__APP_IMAGE__|$APP_IMAGE|g" \
                             -e "s|__HOST_PID__|$HOST_PID|g" \
                             -e "s|__SECURITY_CONTEXT__|$SECURITY_CONTEXT|g" \
                             -e "s|__NOISE_SETUP__|$NOISE_SETUP|g" \
                             -e "s|__REGRESSION_SETUP__|$REGRESSION_SETUP|g" \
                             -e "s|__TEST_DELAY__|$TEST_DELAY|g" \
+                            -e "s|__RUN_ID__|$run|g" \
                             k8s/test.yaml \
                           | kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" apply -f -
 
                         TEST_STATUS=1
                         for attempt in $(seq 1 120); do
-                            SUCCEEDED="$(kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" get job keploy-test -o jsonpath='{.status.succeeded}')"
-                            FAILED="$(kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" get job keploy-test -o jsonpath='{.status.failed}')"
+                            SUCCEEDED="$(kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" get job "keploy-test-$run" -o jsonpath='{.status.succeeded}')"
+                            FAILED="$(kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" get job "keploy-test-$run" -o jsonpath='{.status.failed}')"
                             if [ "$SUCCEEDED" = "1" ]; then
                                 TEST_STATUS=0
                                 break
@@ -201,8 +273,23 @@ pipeline {
                             sleep 2
                         done
 
-                        kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" logs job/keploy-test || true
-                        exit "$TEST_STATUS"
+                        kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" \
+                          logs "job/keploy-test-$run" > "$WORKSPACE/keploy-output/test-run-$run.log" 2>&1 || true
+                        cat "$WORKSPACE/keploy-output/test-run-$run.log"
+
+                        if [ "$TEST_STATUS" -ne 0 ]; then
+                            OVERALL=1
+                        fi
+
+                        # Every round is driven to completion even after a failure,
+                        # so a two-round comparison still has both logs to compare.
+                        # Deleting the Job frees the keploy-notes Service for the
+                        # next round's pod.
+                        kubectl --context "$MINIKUBE_PROFILE" -n "$TEST_NAMESPACE" \
+                          delete job "keploy-test-$run" --timeout=60s || true
+                        done
+
+                        exit "$OVERALL"
                     '''
                 }
             }
@@ -211,6 +298,11 @@ pipeline {
 
     post {
         always {
+            // Runs before the namespace teardown below, and on red builds too:
+            // an injected regression is exactly when the recorded cases and the
+            // failure diff are worth keeping.
+            archiveArtifacts artifacts: 'keploy-output/**', allowEmptyArchive: true, fingerprint: false
+
             sh '''
                 kubectl --context "$MINIKUBE_PROFILE" delete namespace "$TEST_NAMESPACE" --ignore-not-found --wait=false || true
                 docker exec minikube docker image rm "$APP_IMAGE" >/dev/null 2>&1 || true
